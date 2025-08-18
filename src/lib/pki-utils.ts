@@ -19,6 +19,34 @@ export interface PrivateKeyInfo {
 }
 
 export class PKIUtils {
+  static async parseCertificateChain(pemData: string): Promise<pkijs.Certificate[]> {
+    try {
+      const certificates: pkijs.Certificate[] = [];
+      
+      // Split PEM data into individual certificates
+      const certBlocks = pemData.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+      
+      if (!certBlocks || certBlocks.length === 0) {
+        throw new Error('No certificates found in the provided file');
+      }
+      
+      for (const certBlock of certBlocks) {
+        const buffer = this.pemToArrayBuffer(certBlock);
+        const asn1 = asn1js.fromBER(buffer);
+        if (asn1.offset === -1) {
+          throw new Error('Cannot parse certificate - invalid ASN.1 structure');
+        }
+        
+        const certificate = new pkijs.Certificate({ schema: asn1.result });
+        certificates.push(certificate);
+      }
+      
+      return certificates;
+    } catch (error) {
+      throw new Error(`Certificate chain parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   static async parseCertificate(certificateData: ArrayBuffer): Promise<CertificateInfo> {
     try {
       const asn1 = asn1js.fromBER(certificateData);
@@ -101,7 +129,8 @@ export class PKIUtils {
   static async signData(
     data: ArrayBuffer,
     privateKey: CryptoKey,
-    certificate: pkijs.Certificate
+    certificate: pkijs.Certificate,
+    caChain: pkijs.Certificate[] = []
   ): Promise<ArrayBuffer> {
     try {
       // For large files, create a detached signature to avoid stack overflow
@@ -111,7 +140,7 @@ export class PKIUtils {
           eContentType: '1.2.840.113549.1.7.1'
           // No eContent - this creates a detached signature
         }),
-        certificates: [certificate],
+        certificates: [certificate, ...caChain],
         signerInfos: [
           new pkijs.SignerInfo({
             version: 1,
@@ -158,7 +187,7 @@ export class PKIUtils {
   static async verifySignature(
     combinedData: ArrayBuffer,
     certificate?: pkijs.Certificate
-  ): Promise<{ verified: boolean; data?: ArrayBuffer; certificate?: pkijs.Certificate }> {
+  ): Promise<{ verified: boolean; data?: ArrayBuffer; certificate?: pkijs.Certificate; certificateChain?: pkijs.Certificate[] }> {
     try {
       // Extract signature and data from combined format
       const dataView = new DataView(combinedData);
@@ -200,10 +229,21 @@ export class PKIUtils {
         data: originalData // provide external data for detached signature
       });
 
+      // Extract all certificates from the signature for chain information
+      const allCertificates: pkijs.Certificate[] = [];
+      if (cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
+        for (const certItem of cmsSignedData.certificates) {
+          if (certItem instanceof pkijs.Certificate) {
+            allCertificates.push(certItem);
+          }
+        }
+      }
+
       return {
         verified: verificationResult,
         data: originalData,
-        certificate: verificationCert
+        certificate: verificationCert,
+        certificateChain: allCertificates.length > 0 ? allCertificates : undefined
       };
     } catch (error) {
       // Fallback: try legacy embedded signature format
@@ -239,10 +279,21 @@ export class PKIUtils {
           originalData = cmsSignedData.encapContentInfo.eContent.valueBlock.valueHex;
         }
 
+        // Extract all certificates from the signature for chain information
+        const allCertificates: pkijs.Certificate[] = [];
+        if (cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
+          for (const certItem of cmsSignedData.certificates) {
+            if (certItem instanceof pkijs.Certificate) {
+              allCertificates.push(certItem);
+            }
+          }
+        }
+
         return {
           verified: verificationResult,
           data: originalData,
-          certificate: verificationCert
+          certificate: verificationCert,
+          certificateChain: allCertificates.length > 0 ? allCertificates : undefined
         };
       } catch {
         throw new Error(`Signature verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);

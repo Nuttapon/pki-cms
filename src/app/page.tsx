@@ -6,6 +6,7 @@ import * as pkijs from 'pkijs';
 
 export default function Home() {
   const [certificateFile, setCertificateFile] = useState<File | null>(null);
+  const [caChainFile, setCaChainFile] = useState<File | null>(null);
   const [privateKeyFile, setPrivateKeyFile] = useState<File | null>(null);
   const [dataFile, setDataFile] = useState<File | null>(null);
   const [result, setResult] = useState<string>('');
@@ -14,6 +15,7 @@ export default function Home() {
   
   const [privateKey, setPrivateKey] = useState<CryptoKey | null>(null);
   const [parsedCertificate, setParsedCertificate] = useState<pkijs.Certificate | null>(null);
+  const [caChainCertificates, setCaChainCertificates] = useState<pkijs.Certificate[]>([]);
 
   const handleCertificateUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -35,6 +37,26 @@ export default function Home() {
         setResult(`Certificate loaded successfully!\nSubject: ${certInfo.subject}\nValid from: ${certInfo.validFrom.toLocaleDateString()} to ${certInfo.validTo.toLocaleDateString()}`);
       } catch (err) {
         setError(`Certificate parsing failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+  };
+
+  const handleCaChainUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setCaChainFile(file);
+      setError('');
+      setIsLoading(true);
+      
+      try {
+        const text = await file.text();
+        const certificates = await PKIUtils.parseCertificateChain(text);
+        setCaChainCertificates(certificates);
+        setResult(`CA chain loaded successfully! Found ${certificates.length} certificate(s) in chain.`);
+      } catch (err) {
+        setError(`CA chain parsing failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
       } finally {
         setIsLoading(false);
       }
@@ -94,7 +116,7 @@ export default function Home() {
       // Add another delay before intensive crypto operation
       await new Promise(resolve => setTimeout(resolve, 100));
       
-      const signedData = await PKIUtils.signData(dataBuffer, privateKey, parsedCertificate);
+      const signedData = await PKIUtils.signData(dataBuffer, privateKey, parsedCertificate, caChainCertificates);
       
       const signedPem = PKIUtils.arrayBufferToPem(signedData, 'PKCS11');
       setResult(`Data signed successfully! (${fileSizeMB}MB file)\n\nFile size: ${dataFile.size.toLocaleString()} bytes\nSignature size: ${signedData.byteLength.toLocaleString()} bytes\n\nDownloading signed file...`);
@@ -148,6 +170,18 @@ export default function Home() {
           resultText += `\n\nCertificate (extracted from signature):\nSubject: ${subject}`;
         }
         
+        // Show certificate chain information
+        if (verificationResult.certificateChain && verificationResult.certificateChain.length > 1) {
+          resultText += `\n\nCertificate Chain (${verificationResult.certificateChain.length} certificates):`;
+          verificationResult.certificateChain.forEach((cert, index) => {
+            const subject = cert.subject.typesAndValues.map(attr => 
+              `${attr.type}=${attr.value.valueBlock.value}`
+            ).join(', ');
+            const role = index === 0 ? 'Signer' : index === verificationResult.certificateChain!.length - 1 ? 'Root CA' : 'Intermediate CA';
+            resultText += `\n  ${index + 1}. ${role}: ${subject}`;
+          });
+        }
+        
         if (verificationResult.data) {
           const originalDataText = new TextDecoder().decode(verificationResult.data);
           const truncatedData = originalDataText.length > 500 
@@ -187,7 +221,7 @@ export default function Home() {
             Upload Files
           </h2>
           
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-4">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                 Certificate (.crt/.pem)
@@ -203,6 +237,24 @@ export default function Home() {
               />
               {certificateFile && (
                 <p className="text-xs text-green-600 mt-1">✓ {certificateFile.name}</p>
+              )}
+            </div>
+
+            <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-4">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                CA Chain (.crt/.pem)
+              </label>
+              <p className="text-xs text-gray-500 mb-2">
+                Optional: Root CA + Intermediate certificates for full chain validation
+              </p>
+              <input
+                type="file"
+                accept=".crt,.pem,.cer"
+                onChange={handleCaChainUpload}
+                className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100"
+              />
+              {caChainFile && (
+                <p className="text-xs text-green-600 mt-1">✓ {caChainFile.name} ({caChainCertificates.length} certs)</p>
               )}
             </div>
 
