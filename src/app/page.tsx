@@ -114,8 +114,8 @@ export default function Home() {
   };
 
   const verifySignature = async () => {
-    if (!dataFile || !parsedCertificate) {
-      setError('Please upload a signed data file (.p7s) and certificate for verification.');
+    if (!dataFile) {
+      setError('Please upload a signed data file (.p7s) for verification.');
       return;
     }
 
@@ -134,14 +134,26 @@ export default function Home() {
       }
       
       const signedDataBuffer = PKIUtils.pemToArrayBuffer(signedDataText);
-      const verificationResult = await PKIUtils.verifySignature(signedDataBuffer, parsedCertificate);
+      const verificationResult = await PKIUtils.verifySignature(signedDataBuffer, parsedCertificate || undefined);
       
       if (verificationResult.verified) {
         let resultText = 'Signature verification: SUCCESS ✓\n\nThe signature is valid and the data has not been tampered with.';
         
+        // Show certificate information if it was extracted from the signature
+        if (verificationResult.certificate && !parsedCertificate) {
+          const cert = verificationResult.certificate;
+          const subject = cert.subject.typesAndValues.map(attr => 
+            `${attr.type}=${attr.value.valueBlock.value}`
+          ).join(', ');
+          resultText += `\n\nCertificate (extracted from signature):\nSubject: ${subject}`;
+        }
+        
         if (verificationResult.data) {
           const originalDataText = new TextDecoder().decode(verificationResult.data);
-          resultText += `\n\nOriginal data:\n${originalDataText}`;
+          const truncatedData = originalDataText.length > 500 
+            ? originalDataText.substring(0, 500) + '...' 
+            : originalDataText;
+          resultText += `\n\nOriginal data (${verificationResult.data.byteLength.toLocaleString()} bytes):\n${truncatedData}`;
           
           const blob = new Blob([verificationResult.data], { type: 'application/octet-stream' });
           const url = URL.createObjectURL(blob);
@@ -180,6 +192,9 @@ export default function Home() {
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                 Certificate (.crt/.pem)
               </label>
+              <p className="text-xs text-gray-500 mb-2">
+                Required for signing | Optional for verification (auto-extracted from .p7s)
+              </p>
               <input
                 type="file"
                 accept=".crt,.pem,.cer"
@@ -211,7 +226,7 @@ export default function Home() {
                 Data File
               </label>
               <p className="text-xs text-gray-500 mb-2">
-                For signing: any file | For verification: .p7s signature file
+                For signing: any file | For verification: .p7s signature file (certificate auto-extracted)
               </p>
               <input
                 type="file"
@@ -235,7 +250,7 @@ export default function Home() {
             
             <button
               onClick={verifySignature}
-              disabled={isLoading || !parsedCertificate || !dataFile}
+              disabled={isLoading || !dataFile}
               className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
             >
               {isLoading ? 'Verifying...' : 'Verify Signature'}

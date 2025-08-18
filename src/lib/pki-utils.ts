@@ -157,8 +157,8 @@ export class PKIUtils {
 
   static async verifySignature(
     combinedData: ArrayBuffer,
-    certificate: pkijs.Certificate
-  ): Promise<{ verified: boolean; data?: ArrayBuffer }> {
+    certificate?: pkijs.Certificate
+  ): Promise<{ verified: boolean; data?: ArrayBuffer; certificate?: pkijs.Certificate }> {
     try {
       // Extract signature and data from combined format
       const dataView = new DataView(combinedData);
@@ -180,16 +180,30 @@ export class PKIUtils {
       const cmsContentInfo = new pkijs.ContentInfo({ schema: asn1.result });
       const cmsSignedData = new pkijs.SignedData({ schema: cmsContentInfo.content });
 
+      // Extract certificate from the signature if not provided
+      let verificationCert = certificate;
+      if (!verificationCert && cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
+        const certItem = cmsSignedData.certificates[0];
+        if (certItem instanceof pkijs.Certificate) {
+          verificationCert = certItem;
+        }
+      }
+
+      if (!verificationCert) {
+        throw new Error('No certificate found in signature and none provided');
+      }
+
       // Verify the detached signature with the original data
       const verificationResult = await cmsSignedData.verify({
         signer: 0,
-        trustedCerts: [certificate],
+        trustedCerts: [verificationCert],
         data: originalData // provide external data for detached signature
       });
 
       return {
         verified: verificationResult,
-        data: originalData
+        data: originalData,
+        certificate: verificationCert
       };
     } catch (error) {
       // Fallback: try legacy embedded signature format
@@ -202,9 +216,22 @@ export class PKIUtils {
         const cmsContentInfo = new pkijs.ContentInfo({ schema: asn1.result });
         const cmsSignedData = new pkijs.SignedData({ schema: cmsContentInfo.content });
 
+        // Extract certificate from the signature if not provided
+        let verificationCert = certificate;
+        if (!verificationCert && cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
+          const certItem = cmsSignedData.certificates[0];
+          if (certItem instanceof pkijs.Certificate) {
+            verificationCert = certItem;
+          }
+        }
+
+        if (!verificationCert) {
+          throw new Error('No certificate found in signature and none provided');
+        }
+
         const verificationResult = await cmsSignedData.verify({
           signer: 0,
-          trustedCerts: [certificate]
+          trustedCerts: [verificationCert]
         });
 
         let originalData: ArrayBuffer | undefined;
@@ -214,7 +241,8 @@ export class PKIUtils {
 
         return {
           verified: verificationResult,
-          data: originalData
+          data: originalData,
+          certificate: verificationCert
         };
       } catch {
         throw new Error(`Signature verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
