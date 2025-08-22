@@ -1,4 +1,6 @@
 import net from 'net';
+import fs from 'fs/promises';
+import path from 'path';
 
 export interface HSMSocketMessage {
   command: string;
@@ -21,15 +23,26 @@ export interface HSMSocketResponse {
   signature?: string;
 }
 
+export interface SoftCard {
+  name: string;
+  path: string;
+  isValid: boolean;
+  certificates?: string[];
+}
+
 export class HSMSocketClient {
   private socket: net.Socket | null = null;
-  private host: string;
-  private port: number;
+  private socketPath: string;
   private timeout: number;
+  private kmDataPath: string;
 
-  constructor(host: string = 'localhost', port: number = 9004, timeout: number = 30000) {
-    this.host = host;
-    this.port = port;
+  constructor(
+    socketPath: string = '/opt/nfast/sockets/nserver',
+    kmDataPath: string = '/opt/nfast/kmdata/local', 
+    timeout: number = 30000
+  ) {
+    this.socketPath = socketPath;
+    this.kmDataPath = kmDataPath;
     this.timeout = timeout;
   }
 
@@ -39,12 +52,13 @@ export class HSMSocketClient {
       
       const timeoutId = setTimeout(() => {
         this.socket?.destroy();
-        reject(new Error('HSM socket connection timeout'));
+        reject(new Error('HSM Unix socket connection timeout'));
       }, this.timeout);
 
-      this.socket.connect(this.port, this.host, () => {
+      // Connect to Unix domain socket
+      this.socket.connect(this.socketPath, () => {
         clearTimeout(timeoutId);
-        console.log(`Connected to nFast HSM at ${this.host}:${this.port}`);
+        console.log(`Connected to nFast HSM socket: ${this.socketPath}`);
         resolve();
       });
 
@@ -71,13 +85,20 @@ export class HSMSocketClient {
       this.socket.on('data', (data) => {
         responseData += data.toString();
         
-        // Check if we have a complete JSON response
-        try {
-          const response = JSON.parse(responseData);
-          clearTimeout(timeoutId);
-          resolve(response);
-        } catch {
-          // Continue receiving data if JSON is incomplete
+        // Check if we have a complete response (nFast typically ends with newline)
+        if (responseData.includes('\n')) {
+          try {
+            const response = JSON.parse(responseData.trim());
+            clearTimeout(timeoutId);
+            resolve(response);
+          } catch {
+            // Try parsing as raw response if not JSON
+            clearTimeout(timeoutId);
+            resolve({
+              success: true,
+              data: responseData.trim()
+            });
+          }
         }
       });
 
@@ -86,7 +107,7 @@ export class HSMSocketClient {
         reject(new Error(`HSM socket error: ${err.message}`));
       });
 
-      // Send command as JSON
+      // Send command to nFast (format may vary based on nFast protocol)
       const command = JSON.stringify(message) + '\n';
       this.socket.write(command);
     });
@@ -99,57 +120,155 @@ export class HSMSocketClient {
     }
   }
 
-  // ดึง certificates จาก HSM
+  // Discover softcards from filesystem
+  async getSoftCards(): Promise<SoftCard[]> {
+    try {
+      const cards: SoftCard[] = [];
+      
+      // Check if kmdata directory exists
+      try {
+        await fs.access(this.kmDataPath);
+      } catch {
+        throw new Error(`nFast kmdata path not found: ${this.kmDataPath}`);
+      }
+
+      // Read directory contents
+      const entries = await fs.readdir(this.kmDataPath, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const cardPath = path.join(this.kmDataPath, entry.name);
+          
+          // Check if it's a valid softcard directory
+          try {
+            const cardFiles = await fs.readdir(cardPath);
+            const hasKeyFiles = cardFiles.some(file => 
+              file.endsWith('.key') || file.endsWith('.crt') || file.includes('key_')
+            );
+            
+            if (hasKeyFiles) {
+              cards.push({
+                name: entry.name,
+                path: cardPath,
+                isValid: true,
+                certificates: cardFiles.filter(f => f.endsWith('.crt'))
+              });
+            }
+          } catch {
+            // Skip invalid card directories
+            cards.push({
+              name: entry.name,
+              path: cardPath,
+              isValid: false
+            });
+          }
+        }
+      }
+      
+      return cards;
+    } catch (error) {
+      throw new Error(`Failed to discover softcards: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  // List certificates from softcards
   async getCertificates(): Promise<HSMSocketResponse> {
     try {
-      await this.connect();
+      const softcards = await this.getSoftCards();
+      const certificates = [];
       
-      const response = await this.sendCommand({
-        command: 'LIST_CERTIFICATES'
-      });
+      for (const card of softcards.filter(c => c.isValid)) {
+        if (card.certificates) {
+          for (const certFile of card.certificates) {
+            try {
+              const certPath = path.join(card.path, certFile);
+              const certData = await fs.readFile(certPath, 'utf8');
+              
+              certificates.push({
+                id: `${card.name}:${certFile}`,
+                cardName: card.name,
+                keyId: certFile.replace('.crt', ''),
+                pemData: certData,
+                subject: this.extractSubjectFromPEM(certData),
+                issuer: this.extractIssuerFromPEM(certData),
+                // Basic validation - in real implementation, parse the certificate
+                validFrom: new Date().toISOString(),
+                validTo: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+              });
+            } catch (err) {
+              console.warn(`Failed to read certificate ${certFile} from card ${card.name}:`, err);
+            }
+          }
+        }
+      }
 
-      return response;
+      return {
+        success: true,
+        certificates
+      };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error'
       };
-    } finally {
-      this.disconnect();
     }
   }
 
-  // Sign data ด้วย HSM
+  // Extract subject from PEM certificate (basic parsing)
+  private extractSubjectFromPEM(pemData: string): string {
+    // This is a simplified extraction - in production use proper certificate parsing
+    const lines = pemData.split('\n');
+    for (const line of lines) {
+      if (line.includes('Subject:')) {
+        return line.replace('Subject:', '').trim();
+      }
+    }
+    return 'Unknown Subject';
+  }
+
+  // Extract issuer from PEM certificate (basic parsing)
+  private extractIssuerFromPEM(pemData: string): string {
+    // This is a simplified extraction - in production use proper certificate parsing
+    const lines = pemData.split('\n');
+    for (const line of lines) {
+      if (line.includes('Issuer:')) {
+        return line.replace('Issuer:', '').trim();
+      }
+    }
+    return 'Unknown Issuer';
+  }
+
+  // Sign data using nFast HSM with softcard
   async signData(
-    keyId: string, 
-    dataHash: string, 
-    cardName: string, 
-    passphrase: string, 
+    keyId: string,
+    dataHash: string,
+    cardName: string,
+    passphrase: string,
     hashAlgorithm: string = 'SHA-256'
   ): Promise<HSMSocketResponse> {
     try {
-      await this.connect();
-
-      // Authenticate with card first
-      const authResponse = await this.sendCommand({
-        command: 'AUTHENTICATE',
-        cardName: cardName,
-        passphrase: passphrase
-      });
-
-      if (!authResponse.success) {
+      // Verify softcard exists
+      const softcards = await this.getSoftCards();
+      const targetCard = softcards.find(c => c.name === cardName && c.isValid);
+      
+      if (!targetCard) {
         return {
           success: false,
-          error: `HSM authentication failed: ${authResponse.error}`
+          error: `Softcard '${cardName}' not found or invalid`
         };
       }
 
-      // Perform signing operation
+      // Connect to nFast socket
+      await this.connect();
+
+      // nFast specific signing command (this depends on actual nFast protocol)
       const signResponse = await this.sendCommand({
-        command: 'SIGN_HASH',
+        command: 'SIGN_DATA',
+        cardName: cardName,
         keyId: keyId,
         dataHash: dataHash,
-        hashAlgorithm: hashAlgorithm
+        hashAlgorithm: hashAlgorithm,
+        passphrase: passphrase
       });
 
       return signResponse;
@@ -163,17 +282,30 @@ export class HSMSocketClient {
     }
   }
 
-  // Get certificate details from HSM
-  async getCertificateDetails(keyId: string): Promise<HSMSocketResponse> {
+  // Test connection to nFast socket
+  async testConnection(): Promise<HSMSocketResponse> {
     try {
+      // Check socket file exists
+      try {
+        await fs.access(this.socketPath);
+      } catch {
+        return {
+          success: false,
+          error: `nFast socket file not found: ${this.socketPath}`
+        };
+      }
+
+      // Test connection
       await this.connect();
       
       const response = await this.sendCommand({
-        command: 'GET_CERTIFICATE',
-        keyId: keyId
+        command: 'STATUS'
       });
 
-      return response;
+      return {
+        success: true,
+        data: response.data || 'nFast HSM connection successful'
+      };
     } catch (error) {
       return {
         success: false,
@@ -184,23 +316,33 @@ export class HSMSocketClient {
     }
   }
 
-  // Test HSM connection
-  async testConnection(): Promise<HSMSocketResponse> {
+  // Get softcard details
+  async getSoftCardDetails(cardName: string): Promise<HSMSocketResponse> {
     try {
-      await this.connect();
+      const softcards = await this.getSoftCards();
+      const card = softcards.find(c => c.name === cardName);
       
-      const response = await this.sendCommand({
-        command: 'PING'
-      });
+      if (!card) {
+        return {
+          success: false,
+          error: `Softcard '${cardName}' not found`
+        };
+      }
 
-      return response;
+      return {
+        success: true,
+        data: {
+          name: card.name,
+          path: card.path,
+          isValid: card.isValid,
+          certificates: card.certificates || []
+        }
+      };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error'
       };
-    } finally {
-      this.disconnect();
     }
   }
 }

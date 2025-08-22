@@ -13,13 +13,14 @@ A web-based application for signing and verifying digital signatures using X.509
 - **Certificate Chain Auto-Extraction**: No need to upload certificates for verification - extracted from .p7s files
 
 ### HSM Integration
-- **nFast HSM Support**: Socket-based integration with Thales nFast Hardware Security Modules
-- **Socket Communication**: Direct TCP socket connection to nFast hardserver
+- **nFast HSM Support**: Unix socket integration with Thales nFast Hardware Security Modules
+- **Unix Socket Communication**: Direct connection to nFast hardserver via Unix domain socket
+- **Softcard Support**: Automatic discovery and management of nFast softcards from filesystem
 - **Remote Signing**: Secure signing using HSM-stored private keys via socket protocol
-- **Card Authentication**: Support for HSM card name and passphrase authentication
-- **Certificate Discovery**: Automatic retrieval of available certificates via socket commands
+- **Filesystem-based Card Authentication**: Softcard discovery from `/opt/nfast/kmdata/local`
+- **Certificate Discovery**: Automatic retrieval of certificates from softcard directories
 - **High Security**: Private keys never leave the HSM environment
-- **Real-time Communication**: Direct socket connection for optimal performance
+- **Real-time Communication**: Direct Unix socket for optimal performance
 
 ### User Interface
 - **Dual Mode Operation**: Toggle between client-side signing and HSM signing
@@ -47,8 +48,8 @@ npm install
 
 ```bash
 # For HSM Integration (optional)
-HSM_HOST=localhost
-HSM_PORT=9004
+HSM_SOCKET_PATH=/opt/nfast/sockets/nserver
+HSM_KMDATA_PATH=/opt/nfast/kmdata/local
 HSM_TIMEOUT=30000
 ```
 

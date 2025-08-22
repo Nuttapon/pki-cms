@@ -3,10 +3,10 @@ import { HSMSocketClient } from '../../../../lib/hsm-socket';
 
 export async function GET() {
   try {
-    const hsmHost = process.env.HSM_HOST || 'localhost';
-    const hsmPort = parseInt(process.env.HSM_PORT || '9004');
+    const socketPath = process.env.HSM_SOCKET_PATH || '/opt/nfast/sockets/nserver';
+    const kmDataPath = process.env.HSM_KMDATA_PATH || '/opt/nfast/kmdata/local';
     
-    const hsmClient = new HSMSocketClient(hsmHost, hsmPort);
+    const hsmClient = new HSMSocketClient(socketPath, kmDataPath);
     const response = await hsmClient.testConnection();
 
     if (!response.success) {
@@ -14,8 +14,8 @@ export async function GET() {
         { 
           success: false, 
           error: `HSM connection test failed: ${response.error}`,
-          host: hsmHost,
-          port: hsmPort
+          socketPath: socketPath,
+          kmDataPath: kmDataPath
         },
         { status: 503 }
       );
@@ -23,9 +23,9 @@ export async function GET() {
 
     return NextResponse.json({
       success: true,
-      message: 'HSM connection successful',
-      host: hsmHost,
-      port: hsmPort,
+      message: 'nFast HSM connection successful',
+      socketPath: socketPath,
+      kmDataPath: kmDataPath,
       timestamp: new Date().toISOString()
     });
 

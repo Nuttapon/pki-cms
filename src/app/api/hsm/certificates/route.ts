@@ -3,10 +3,10 @@ import { HSMSocketClient } from '../../../../lib/hsm-socket';
 
 export async function GET() {
   try {
-    const hsmHost = process.env.HSM_HOST || 'localhost';
-    const hsmPort = parseInt(process.env.HSM_PORT || '9004');
+    const socketPath = process.env.HSM_SOCKET_PATH || '/opt/nfast/sockets/nserver';
+    const kmDataPath = process.env.HSM_KMDATA_PATH || '/opt/nfast/kmdata/local';
     
-    const hsmClient = new HSMSocketClient(hsmHost, hsmPort);
+    const hsmClient = new HSMSocketClient(socketPath, kmDataPath);
     const response = await hsmClient.getCertificates();
 
     if (!response.success) {
@@ -26,7 +26,8 @@ export async function GET() {
         validFrom: cert.validFrom,
         validTo: cert.validTo,
         pemData: cert.pemData || cert.certificate,
-        keyId: cert.keyId // HSM key identifier
+        keyId: cert.keyId, // HSM key identifier
+        cardName: cert.cardName // Softcard name
       }))
     });
 
