@@ -133,13 +133,16 @@ export class PKIUtils {
     caChain: pkijs.Certificate[] = []
   ): Promise<ArrayBuffer> {
     try {
-      // For large files, create a detached signature to avoid stack overflow
+      // Create CMS SignedData with encapsulated content as per diagram
+      // Content Type = SIGNED-DATA with embedded original data
       const cmsSignedData = new pkijs.SignedData({
         version: 1,
         encapContentInfo: new pkijs.EncapsulatedContentInfo({
-          eContentType: '1.2.840.113549.1.7.1'
-          // No eContent - this creates a detached signature
+          eContentType: '1.2.840.113549.1.7.1' // id-data
+          // eContent will be set after signing
         }),
+        // Certificate chain: End-entity (signer) + Intermediates + Root CA
+        // Order matters for proper chain validation as per diagram
         certificates: [certificate, ...caChain],
         signerInfos: [
           new pkijs.SignerInfo({
@@ -152,32 +155,20 @@ export class PKIUtils {
         ]
       });
 
-      // Sign with external data (detached signature)
-      await cmsSignedData.sign(privateKey, 0, 'SHA-256', data);
+      // First set the eContent with the data
+      cmsSignedData.encapContentInfo.eContent = new asn1js.OctetString({ valueHex: data });
       
+      // Sign the data (it will use the encapsulated data for signing)
+      await cmsSignedData.sign(privateKey, 0, 'SHA-256');
+      
+      // Create the complete CMS ContentInfo structure
       const cmsContentInfo = new pkijs.ContentInfo({
-        contentType: '1.2.840.113549.1.7.2',
+        contentType: '1.2.840.113549.1.7.2', // id-signedData
         content: cmsSignedData.toSchema()
       });
 
-      // Create a combined structure with both signature and data
-      const signatureBuffer = cmsContentInfo.toSchema().toBER();
-      const combinedSize = signatureBuffer.byteLength + data.byteLength + 1024; // extra space for headers
-      const combinedBuffer = new ArrayBuffer(combinedSize);
-      const combinedView = new Uint8Array(combinedBuffer);
-      
-      // Add signature length header (4 bytes)
-      const sigLengthView = new DataView(combinedBuffer, 0, 4);
-      sigLengthView.setUint32(0, signatureBuffer.byteLength, false);
-      
-      // Add signature
-      combinedView.set(new Uint8Array(signatureBuffer), 4);
-      
-      // Add original data
-      combinedView.set(new Uint8Array(data), 4 + signatureBuffer.byteLength);
-      
-      // Return only the used portion
-      return combinedBuffer.slice(0, 4 + signatureBuffer.byteLength + data.byteLength);
+      // Return the complete CMS SignedData structure with embedded content
+      return cmsContentInfo.toSchema().toBER();
 
     } catch (error) {
       throw new Error(`Data signing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -185,33 +176,29 @@ export class PKIUtils {
   }
 
   static async verifySignature(
-    combinedData: ArrayBuffer,
+    signedDataBuffer: ArrayBuffer,
     certificate?: pkijs.Certificate
   ): Promise<{ verified: boolean; data?: ArrayBuffer; certificate?: pkijs.Certificate; certificateChain?: pkijs.Certificate[] }> {
     try {
-      // Extract signature and data from combined format
-      const dataView = new DataView(combinedData);
-      const signatureLength = dataView.getUint32(0, false);
-      
-      if (signatureLength <= 0 || signatureLength > combinedData.byteLength - 4) {
-        throw new Error('Invalid combined signature format');
-      }
-      
-      const signatureData = combinedData.slice(4, 4 + signatureLength);
-      const originalData = combinedData.slice(4 + signatureLength);
-      
-      // Parse the detached signature
-      const asn1 = asn1js.fromBER(signatureData);
+      // Parse the CMS SignedData structure with encapsulated content
+      const asn1 = asn1js.fromBER(signedDataBuffer);
       if (asn1.offset === -1) {
-        throw new Error('Cannot parse signature - invalid ASN.1 structure');
+        throw new Error('Cannot parse signed data - invalid ASN.1 structure');
       }
 
       const cmsContentInfo = new pkijs.ContentInfo({ schema: asn1.result });
+      
+      // Verify this is a SignedData ContentInfo
+      if (cmsContentInfo.contentType !== '1.2.840.113549.1.7.2') {
+        throw new Error('Invalid content type - not a CMS SignedData');
+      }
+      
       const cmsSignedData = new pkijs.SignedData({ schema: cmsContentInfo.content });
 
-      // Extract certificate from the signature if not provided
+      // Extract signer certificate from the embedded certificate chain
       let verificationCert = certificate;
       if (!verificationCert && cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
+        // First certificate should be the signer (end-entity)
         const certItem = cmsSignedData.certificates[0];
         if (certItem instanceof pkijs.Certificate) {
           verificationCert = certItem;
@@ -222,14 +209,31 @@ export class PKIUtils {
         throw new Error('No certificate found in signature and none provided');
       }
 
-      // Verify the detached signature with the original data
+      // Verify the CMS SignedData with encapsulated content
       const verificationResult = await cmsSignedData.verify({
         signer: 0,
-        trustedCerts: [verificationCert],
-        data: originalData // provide external data for detached signature
+        trustedCerts: [verificationCert]
+        // No external data needed - content is encapsulated
       });
 
-      // Extract all certificates from the signature for chain information
+      // Extract the original data from encapsulated content
+      let originalData: ArrayBuffer | undefined;
+      
+      // Check if we have encapsulated content
+      if (cmsSignedData.encapContentInfo && cmsSignedData.encapContentInfo.eContent) {
+        const eContent = cmsSignedData.encapContentInfo.eContent;
+        
+        // Try to extract data from the OctetString
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if ((eContent as any).valueBlock && (eContent as any).valueBlock.valueHex) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          originalData = (eContent as any).valueBlock.valueHex;
+        } else if (eContent instanceof asn1js.OctetString) {
+          originalData = eContent.valueBlock.valueHex;
+        }
+      }
+
+      // Extract complete certificate chain for display
       const allCertificates: pkijs.Certificate[] = [];
       if (cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
         for (const certItem of cmsSignedData.certificates) {
@@ -245,59 +249,9 @@ export class PKIUtils {
         certificate: verificationCert,
         certificateChain: allCertificates.length > 0 ? allCertificates : undefined
       };
+      
     } catch (error) {
-      // Fallback: try legacy embedded signature format
-      try {
-        const asn1 = asn1js.fromBER(combinedData);
-        if (asn1.offset === -1) {
-          throw new Error('Cannot parse signed data - invalid ASN.1 structure');
-        }
-
-        const cmsContentInfo = new pkijs.ContentInfo({ schema: asn1.result });
-        const cmsSignedData = new pkijs.SignedData({ schema: cmsContentInfo.content });
-
-        // Extract certificate from the signature if not provided
-        let verificationCert = certificate;
-        if (!verificationCert && cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
-          const certItem = cmsSignedData.certificates[0];
-          if (certItem instanceof pkijs.Certificate) {
-            verificationCert = certItem;
-          }
-        }
-
-        if (!verificationCert) {
-          throw new Error('No certificate found in signature and none provided');
-        }
-
-        const verificationResult = await cmsSignedData.verify({
-          signer: 0,
-          trustedCerts: [verificationCert]
-        });
-
-        let originalData: ArrayBuffer | undefined;
-        if (cmsSignedData.encapContentInfo.eContent) {
-          originalData = cmsSignedData.encapContentInfo.eContent.valueBlock.valueHex;
-        }
-
-        // Extract all certificates from the signature for chain information
-        const allCertificates: pkijs.Certificate[] = [];
-        if (cmsSignedData.certificates && cmsSignedData.certificates.length > 0) {
-          for (const certItem of cmsSignedData.certificates) {
-            if (certItem instanceof pkijs.Certificate) {
-              allCertificates.push(certItem);
-            }
-          }
-        }
-
-        return {
-          verified: verificationResult,
-          data: originalData,
-          certificate: verificationCert,
-          certificateChain: allCertificates.length > 0 ? allCertificates : undefined
-        };
-      } catch {
-        throw new Error(`Signature verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
+      throw new Error(`Signature verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
