@@ -1,17 +1,31 @@
 # PKI Digital Signature Tool
 
-A web-based application for signing and verifying digital signatures using X.509 certificates and PKI.js library.
+A web-based application for signing and verifying digital signatures using X.509 certificates, PKI.js library, and HSM (Hardware Security Module) integration.
 
 ## Features
 
+### Core PKI Operations
 - **Certificate Management**: Upload and parse X.509 certificates (.crt, .pem, .cer)
 - **CA Chain Support**: Include complete certificate chains (Root CA + Intermediate CAs) in signatures
 - **Private Key Support**: Load private keys (.key, .pem) for signing operations
-- **Digital Signing**: Sign any data file using PKCS#11 format with embedded certificate chains
+- **Digital Signing**: Sign any data file using CMS SignedData format with encapsulated content
 - **Signature Verification**: Verify digital signatures with automatic certificate chain extraction
 - **Certificate Chain Auto-Extraction**: No need to upload certificates for verification - extracted from .p7s files
-- **Download Support**: Automatic download of signed files and extracted data
+
+### HSM Integration
+- **nFast HSM Support**: Socket-based integration with Thales nFast Hardware Security Modules
+- **Socket Communication**: Direct TCP socket connection to nFast hardserver
+- **Remote Signing**: Secure signing using HSM-stored private keys via socket protocol
+- **Card Authentication**: Support for HSM card name and passphrase authentication
+- **Certificate Discovery**: Automatic retrieval of available certificates via socket commands
+- **High Security**: Private keys never leave the HSM environment
+- **Real-time Communication**: Direct socket connection for optimal performance
+
+### User Interface
+- **Dual Mode Operation**: Toggle between client-side signing and HSM signing
 - **Modern UI**: Clean, responsive interface with dark mode support
+- **Real-time Feedback**: Live status updates during signing operations
+- **Download Support**: Automatic download of signed files and extracted data
 
 ## Getting Started
 
@@ -29,13 +43,22 @@ A web-based application for signing and verifying digital signatures using X.509
 npm install
 ```
 
-3. Run the development server:
+3. Configure environment variables (copy `.env.example` to `.env.local`):
+
+```bash
+# For HSM Integration (optional)
+HSM_HOST=localhost
+HSM_PORT=9004
+HSM_TIMEOUT=30000
+```
+
+4. Run the development server:
 
 ```bash
 npm run dev
 ```
 
-4. Open [http://localhost:3000](http://localhost:3000) in your browser
+5. Open [http://localhost:3000](http://localhost:3000) in your browser
 
 ### Generate Test Files (Optional)
 
@@ -103,18 +126,27 @@ sequenceDiagram
 
 ## Usage
 
-### Digital Signing
+### Client-Side Digital Signing
 
 1. **Upload Certificate**: Choose your X.509 certificate file (.crt, .pem, .cer)
 2. **Upload CA Chain** (Optional): Select CA certificate chain file (.pem) containing Root CA + Intermediate CAs
 3. **Upload Private Key**: Select the corresponding private key file (.key, .pem)
 4. **Upload Data File**: Choose any file you want to sign
-5. **Click "Sign Data"**: The application will create a PKCS#11 signature with embedded certificate chain and download it automatically
+5. **Click "Sign Data"**: Creates CMS SignedData with encapsulated content and downloads .p7s file
+
+### HSM-Based Digital Signing
+
+1. **Enable HSM Mode**: Check "Use HSM nFast" toggle
+2. **Load HSM Certificates**: Click "Refresh" to discover available certificates
+3. **Select Certificate**: Choose from HSM certificate dropdown
+4. **Authentication**: Enter HSM card name and passphrase
+5. **Upload Data File**: Choose any file you want to sign
+6. **Click "Sign with HSM"**: Securely signs using HSM and downloads .p7s file
 
 ### Signature Verification
 
 1. **Upload Signed Data**: Select the .p7s signature file (certificate chain is auto-extracted)
-2. **Click "Verify Signature"**: The application will verify the signature, display the certificate chain hierarchy, and extract the original data if valid
+2. **Click "Verify Signature"**: Verifies signature, displays certificate chain hierarchy, and extracts original data
 
 **Note**: Certificate upload is optional for verification as certificates are automatically extracted from the .p7s signature file.
 
@@ -193,34 +225,52 @@ The sample data file (~100KB) is designed to test:
 
 ## Architecture Overview
 
+### Client-Side + HSM Hybrid Architecture
+
 ```mermaid
 graph TB
-    subgraph Client["Client-Side Application"]
-        A["React/Next.js UI<br/>File Upload Interface"]
-        B["PKI Utils Library<br/>Cryptographic Operations"]
-        C["Web Crypto API<br/>Browser Native Crypto"]
-        D["PKI.js Library<br/>X.509 & PKCS#11"]
+    subgraph Browser["Browser Application"]
+        UI["React/Next.js UI<br/>Dual Mode Interface"]
+        PKI["PKI Utils Library<br/>Crypto Operations"]
+        HSM["HSM Utils Library<br/>Remote Signing"]
+        WEB["Web Crypto API<br/>Browser Native Crypto"]
+        PKIJS["PKI.js Library<br/>X.509 & CMS"]
     end
     
-    subgraph Files["File Processing"]
-        E["Certificate Files<br/>.crt/.pem/.cer"]
-        F["Private Key Files<br/>.key/.pem"]
-        G["Data Files<br/>Any format"]
-        H["Signature Files<br/>.p7s PKCS#11"]
+    subgraph Server["Next.js API Routes"]
+        CERT_API["/api/hsm/certificates<br/>Certificate Discovery"]
+        SIGN_API["/api/hsm/sign<br/>Remote Signing"]
+        TEST_API["/api/hsm/test<br/>Connection Test"]
     end
     
-    A --> B
-    B --> C
-    B --> D
-    E --> A
-    F --> A
-    G --> A
-    A --> H
+    subgraph HSM_Socket["HSM Socket Layer"]
+        SOCKET_CLIENT["HSMSocketClient<br/>TCP Socket Communication"]
+    end
     
-    style A fill:#e3f2fd
-    style B fill:#fff3e0
-    style C fill:#e8f5e8
-    style D fill:#f3e5f5
+    subgraph HSM_Infrastructure["HSM Infrastructure"]
+        HARDSERVER["nFast Hardserver<br/>Socket Server (Port 9004)"]
+        NFAST["nFast HSM<br/>Hardware Security Module"]
+        CARDS["Security Cards<br/>Authentication"]
+    end
+    
+    UI --> PKI
+    UI --> HSM
+    PKI --> WEB
+    PKI --> PKIJS
+    HSM --> CERT_API
+    HSM --> SIGN_API
+    HSM --> TEST_API
+    CERT_API --> SOCKET_CLIENT
+    SIGN_API --> SOCKET_CLIENT
+    TEST_API --> SOCKET_CLIENT
+    SOCKET_CLIENT -.->|TCP Socket| HARDSERVER
+    HARDSERVER --> NFAST
+    NFAST --> CARDS
+    
+    style UI fill:#e3f2fd
+    style PKI fill:#fff3e0
+    style HSM fill:#ffebee
+    style NFAST fill:#e8f5e8
 ```
 
 ## How It Works
@@ -305,17 +355,77 @@ graph TD
 
 ## Technical Details
 
-- **Built with**: Next.js 15, React 19, TypeScript, Tailwind CSS
-- **Crypto Library**: PKI.js for X.509 and PKCS#11 operations
-- **Browser Support**: Modern browsers with Web Crypto API support
-- **Security**: All cryptographic operations happen client-side using Web Crypto API
+### Core Technologies
+- **Framework**: Next.js 15, React 19, TypeScript, Tailwind CSS
+- **Cryptography**: PKI.js for X.509 and CMS operations
+- **Browser Crypto**: Web Crypto API for client-side operations
+- **HSM Integration**: Thales nFast HSM support via hardserver API
+
+### Security Architecture
+- **Client-Side Crypto**: All client operations use Web Crypto API
+- **HSM Security**: Private keys never leave HSM environment
+- **CMS SignedData**: Full compliance with RFC 5652 standard
+- **Certificate Chains**: Complete PKI chain embedding and validation
+
+### API Endpoints
+- `GET /api/hsm/certificates` - Retrieve available HSM certificates via socket
+- `POST /api/hsm/sign` - Remote signing via HSM socket with card authentication  
+- `GET /api/hsm/test` - Test HSM socket connection and availability
+
+### Socket Communication
+- **Protocol**: TCP Socket connection to nFast hardserver
+- **Default Port**: 9004 (configurable via HSM_PORT)
+- **Commands**: JSON-based command protocol
+- **Authentication**: Card-based authentication for signing operations
 
 ## File Formats Supported
 
 - **Certificates**: .crt, .pem, .cer (X.509 format)
 - **CA Chain**: .pem (Multiple certificates in single file)
-- **Private Keys**: .key, .pem (PKCS#8 format)
-- **Signatures**: PKCS#11 format (.p7s files) with embedded certificate chains
+- **Private Keys**: .key, .pem (PKCS#8 format) - Client-side only
+- **HSM Certificates**: Retrieved automatically from HSM
+- **Signatures**: CMS SignedData format (.p7s files) with encapsulated content and embedded certificate chains
+
+## HSM Configuration
+
+### Environment Variables
+```bash
+# Required for HSM integration
+HSM_HOST=localhost              # nFast hardserver host
+HSM_PORT=9004                  # nFast hardserver socket port
+
+# Optional HSM settings
+HSM_TIMEOUT=30000              # Socket timeout in milliseconds
+HSM_MODULE_TYPE=accelerator-user
+HSM_WORLD_NAME=HSMWORLD
+```
+
+### HSM Socket Protocol
+
+**Available Commands:**
+- `LIST_CERTIFICATES` - Retrieve available certificates
+- `AUTHENTICATE` - Authenticate with card and passphrase
+- `SIGN_HASH` - Sign data hash with specified key
+- `GET_CERTIFICATE` - Get certificate details by key ID
+- `PING` - Test connection
+
+**Message Format:**
+```json
+{
+  "command": "SIGN_HASH",
+  "keyId": "key-identifier",
+  "dataHash": "base64-encoded-hash",
+  "cardName": "card1",
+  "passphrase": "your-passphrase",
+  "hashAlgorithm": "SHA-256"
+}
+```
+
+### HSM Requirements
+- Thales nFast HSM with hardserver running on socket port 9004
+- Security cards with valid passphrase authentication
+- Network connectivity to hardserver socket
+- Valid certificates and private keys stored in HSM
 
 ## Scripts
 

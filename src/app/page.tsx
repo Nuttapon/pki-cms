@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { PKIUtils } from '../lib/pki-utils';
+import { HSMUtils, HSMCertificate } from '../lib/hsm-utils';
 import * as pkijs from 'pkijs';
 
 export default function Home() {
@@ -16,6 +17,14 @@ export default function Home() {
   const [privateKey, setPrivateKey] = useState<CryptoKey | null>(null);
   const [parsedCertificate, setParsedCertificate] = useState<pkijs.Certificate | null>(null);
   const [caChainCertificates, setCaChainCertificates] = useState<pkijs.Certificate[]>([]);
+  
+  // HSM state
+  const [useHSM, setUseHSM] = useState(false);
+  const [hsmCertificates, setHsmCertificates] = useState<HSMCertificate[]>([]);
+  const [selectedHSMCert, setSelectedHSMCert] = useState<HSMCertificate | null>(null);
+  const [hsmLoading, setHsmLoading] = useState(false);
+  const [hsmCardName, setHsmCardName] = useState<string>('');
+  const [hsmPassphrase, setHsmPassphrase] = useState<string>('');
 
   const handleCertificateUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -92,10 +101,53 @@ export default function Home() {
     }
   };
 
+  // Load HSM certificates on component mount
+  useEffect(() => {
+    if (useHSM) {
+      loadHSMCertificates();
+    }
+  }, [useHSM]);
+
+  const loadHSMCertificates = async () => {
+    setHsmLoading(true);
+    setError('');
+    
+    try {
+      const certs = await HSMUtils.getAvailableCertificates();
+      setHsmCertificates(certs);
+      setResult(`Found ${certs.length} certificates in HSM`);
+    } catch (err) {
+      setError(`Failed to load HSM certificates: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setHsmLoading(false);
+    }
+  };
+
   const signData = async () => {
-    if (!dataFile || !privateKey || !parsedCertificate) {
-      setError('Please upload and parse all required files: certificate, private key, and data file.');
+    if (!dataFile) {
+      setError('Please upload a data file to sign.');
       return;
+    }
+
+    // Check requirements based on signing method
+    if (useHSM) {
+      if (!selectedHSMCert) {
+        setError('Please select an HSM certificate for signing.');
+        return;
+      }
+      if (!hsmCardName.trim()) {
+        setError('Please enter HSM card name.');
+        return;
+      }
+      if (!hsmPassphrase.trim()) {
+        setError('Please enter HSM passphrase.');
+        return;
+      }
+    } else {
+      if (!privateKey || !parsedCertificate) {
+        setError('Please upload and parse certificate and private key files.');
+        return;
+      }
     }
 
     setIsLoading(true);
@@ -116,7 +168,28 @@ export default function Home() {
       // Add another delay before intensive crypto operation
       await new Promise(resolve => setTimeout(resolve, 100));
       
-      const signedData = await PKIUtils.signData(dataBuffer, privateKey, parsedCertificate, caChainCertificates);
+      let signedData: ArrayBuffer;
+      
+      if (useHSM && selectedHSMCert) {
+        // HSM signing
+        setResult(`Signing with HSM certificate: ${selectedHSMCert.subject}...`);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Parse HSM certificate
+        const hsmCertificate = await HSMUtils.parseCertificateFromPEM(selectedHSMCert.pemData);
+        
+        signedData = await PKIUtils.signDataWithHSM(
+          dataBuffer, 
+          selectedHSMCert.keyId, 
+          hsmCertificate, 
+          caChainCertificates,
+          hsmCardName,
+          hsmPassphrase
+        );
+      } else {
+        // Client-side signing (original method)
+        signedData = await PKIUtils.signData(dataBuffer, privateKey!, parsedCertificate!, caChainCertificates);
+      }
       
       const signedPem = PKIUtils.arrayBufferToPem(signedData, 'PKCS11');
       setResult(`Data signed successfully! (${fileSizeMB}MB file)\n\nFile size: ${dataFile.size.toLocaleString()} bytes\nSignature size: ${signedData.byteLength.toLocaleString()} bytes\n\nDownloading signed file...`);
@@ -217,11 +290,128 @@ export default function Home() {
         </h1>
         
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-800 dark:text-gray-200 mb-4">
-            Upload Files
-          </h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-gray-200">
+              {useHSM ? 'HSM Certificate Signing' : 'Upload Files'}
+            </h2>
+            <div className="flex items-center space-x-2">
+              <label className="inline-flex items-center">
+                <input
+                  type="checkbox"
+                  checked={useHSM}
+                  onChange={(e) => setUseHSM(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600 shadow-sm focus:ring-blue-500"
+                />
+                <span className="ml-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Use HSM nFast
+                </span>
+              </label>
+            </div>
+          </div>
           
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          {useHSM ? (
+            // HSM Certificate Selection
+            <div className="space-y-4 mb-6">
+              <div className="border-2 border-dashed border-blue-300 dark:border-blue-600 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    HSM Certificates
+                  </label>
+                  <button
+                    onClick={loadHSMCertificates}
+                    disabled={hsmLoading}
+                    className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400"
+                  >
+                    {hsmLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mb-3">
+                  Select certificate from HSM for signing
+                </p>
+                
+                {hsmCertificates.length > 0 ? (
+                  <select
+                    value={selectedHSMCert?.id || ''}
+                    onChange={(e) => {
+                      const cert = hsmCertificates.find(c => c.id === e.target.value);
+                      setSelectedHSMCert(cert || null);
+                    }}
+                    className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                  >
+                    <option value="">Select HSM Certificate...</option>
+                    {hsmCertificates.map((cert) => (
+                      <option key={cert.id} value={cert.id}>
+                        {cert.subject} (Valid until: {new Date(cert.validTo).toLocaleDateString()})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-sm text-gray-500">No HSM certificates found. Click Refresh to load.</p>
+                )}
+                
+                {selectedHSMCert && (
+                  <div className="mt-2 p-2 bg-green-50 rounded text-xs">
+                    <p><strong>Selected:</strong> {selectedHSMCert.subject}</p>
+                    <p><strong>Key ID:</strong> {selectedHSMCert.keyId}</p>
+                  </div>
+                )}
+              </div>
+              
+              {/* HSM Card Name และ Passphrase */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="border-2 border-dashed border-yellow-300 dark:border-yellow-600 rounded-lg p-4">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    HSM Card Name
+                  </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    nFast security card name (e.g., &quot;card1&quot;, &quot;smartcard&quot;)
+                  </p>
+                  <input
+                    type="text"
+                    value={hsmCardName}
+                    onChange={(e) => setHsmCardName(e.target.value)}
+                    placeholder="Enter card name..."
+                    className="w-full p-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                
+                <div className="border-2 border-dashed border-red-300 dark:border-red-600 rounded-lg p-4">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    HSM Passphrase
+                  </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Security passphrase for HSM card authentication
+                  </p>
+                  <input
+                    type="password"
+                    value={hsmPassphrase}
+                    onChange={(e) => setHsmPassphrase(e.target.value)}
+                    placeholder="Enter passphrase..."
+                    className="w-full p-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+              </div>
+              
+              {/* Data File Upload for HSM */}
+              <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-4">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Data File
+                </label>
+                <p className="text-xs text-gray-500 mb-2">
+                  File to be signed using HSM
+                </p>
+                <input
+                  type="file"
+                  onChange={handleDataFileUpload}
+                  className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                />
+                {dataFile && (
+                  <p className="text-xs text-green-600 mt-1">✓ {dataFile.name}</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-4">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                 Certificate (.crt/.pem)
@@ -290,14 +480,15 @@ export default function Home() {
               )}
             </div>
           </div>
+          )}
 
           <div className="flex gap-4 justify-center">
             <button
               onClick={signData}
-              disabled={isLoading || !parsedCertificate || !privateKey || !dataFile}
+              disabled={isLoading || !dataFile || (useHSM ? !selectedHSMCert : (!parsedCertificate || !privateKey))}
               className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
             >
-              {isLoading ? 'Signing...' : 'Sign Data'}
+              {isLoading ? 'Signing...' : useHSM ? 'Sign with HSM' : 'Sign Data'}
             </button>
             
             <button

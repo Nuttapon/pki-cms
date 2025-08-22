@@ -1,6 +1,7 @@
 import * as pkijs from 'pkijs';
 import * as asn1js from 'asn1js';
 import { getCrypto } from 'pkijs';
+import { HSMUtils } from './hsm-utils';
 
 export interface CertificateInfo {
   subject: string;
@@ -126,7 +127,18 @@ export class PKIUtils {
     }
   }
 
+  // ฟังก์ชัน signing แบบเดิม (client-side)
   static async signData(
+    data: ArrayBuffer,
+    privateKey: CryptoKey,
+    certificate: pkijs.Certificate,
+    caChain: pkijs.Certificate[] = []
+  ): Promise<ArrayBuffer> {
+    return this.signDataClientSide(data, privateKey, certificate, caChain);
+  }
+
+  // Client-side signing (เดิม)
+  private static async signDataClientSide(
     data: ArrayBuffer,
     privateKey: CryptoKey,
     certificate: pkijs.Certificate,
@@ -286,6 +298,61 @@ export class PKIUtils {
         throw new Error('Invalid base64 encoding in PEM file');
       }
       throw error;
+    }
+  }
+
+  // HSM-based signing
+  static async signDataWithHSM(
+    data: ArrayBuffer,
+    keyId: string,
+    certificate: pkijs.Certificate,
+    caChain: pkijs.Certificate[] = [],
+    cardName?: string,
+    passphrase?: string
+  ): Promise<ArrayBuffer> {
+    try {
+      // สร้าง hash ของข้อมูล
+      const dataHash = await HSMUtils.createDataHash(data, 'SHA-256');
+      
+      // ส่งไป HSM sign พร้อม card name และ passphrase
+      const hsmResult = await HSMUtils.signWithHSM(dataHash, keyId, 'SHA-256', cardName, passphrase);
+      
+      if (!hsmResult.success || !hsmResult.signature) {
+        throw new Error(hsmResult.error || 'HSM signing failed');
+      }
+
+      // สร้าง CMS SignedData structure
+      const cmsSignedData = new pkijs.SignedData({
+        version: 1,
+        encapContentInfo: new pkijs.EncapsulatedContentInfo({
+          eContentType: '1.2.840.113549.1.7.1' // id-data
+        }),
+        certificates: [certificate, ...caChain],
+        signerInfos: []
+      });
+
+      // เพิ่มข้อมูลเข้าไปใน encapsulated content
+      cmsSignedData.encapContentInfo.eContent = new asn1js.OctetString({ valueHex: data });
+      
+      // สร้าง SignerInfo ด้วย HSM signature
+      const signerInfo = HSMUtils.createSignerInfoWithHSMSignature(
+        certificate, 
+        hsmResult.signature, 
+        'SHA-256'
+      );
+      
+      cmsSignedData.signerInfos.push(signerInfo);
+      
+      // สร้าง ContentInfo
+      const cmsContentInfo = new pkijs.ContentInfo({
+        contentType: '1.2.840.113549.1.7.2', // id-signedData
+        content: cmsSignedData.toSchema()
+      });
+
+      return cmsContentInfo.toSchema().toBER();
+
+    } catch (error) {
+      throw new Error(`HSM signing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
